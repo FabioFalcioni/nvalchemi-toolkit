@@ -9,6 +9,10 @@
 
 ## Fixed
 
+- `DistributedPipeline` sends that reach the send buffer's atom or edge
+  capacity send the graduates that fit and keep the rest for a later send.
+  Only a graph larger than the empty buffer raises `ValueError`, which gives
+  the largest selected atom and edge counts and the `BufferConfig` capacities.
 - Plain `DistributedPipeline` stages reset the status of received samples.
   Samples sent by a `FusedStage` kept its `exit_status`, so the receiving
   stage stored them as results without stepping them.
