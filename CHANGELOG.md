@@ -9,6 +9,9 @@
 
 ## Fixed
 
+- Plain `DistributedPipeline` stages reset the status of received samples.
+  Samples sent by a `FusedStage` kept its `exit_status`, so the receiving
+  stage stored them as results without stepping them.
 - Stage sinks drop neighbor data so samples with different neighbor widths
   can be collected together.
 - Received pipeline samples bypass template-buffer copies so missing outputs
