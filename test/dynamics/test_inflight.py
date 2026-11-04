@@ -988,6 +988,73 @@ class TestFusedStageInflight:
         assert stage._admission_initialized is False
         assert stage._forces_primed is False
 
+    def _first_stage(self, sampler: SizeAwareSampler) -> FusedStage:
+        """Build a first pipeline stage that sends to rank 1."""
+        return FusedStage(
+            sub_stages=[(0, _IncrementDynamics(model=self.model, device_type="cpu"))],
+            sampler=sampler,
+            prior_rank=None,
+            next_rank=1,
+            buffer_config=BufferConfig(num_systems=2, num_nodes=4, num_edges=0),
+            device_type="cpu",
+        )
+
+    def _step_first_stage(
+        self, stage: FusedStage, converged: torch.Tensor | None = None
+    ) -> None:
+        """Run one pipeline step as rank 0; ``stage.step`` reports *converged*."""
+        pipeline = DistributedPipeline(stages={0: stage, 1: stage})
+        batch = stage.active_batch
+        with (
+            patch("nvalchemi.dynamics.base.dist.is_initialized", return_value=True),
+            patch("nvalchemi.dynamics.base.dist.get_rank", return_value=0),
+            patch.object(Batch, "isend", return_value=Mock()),
+            patch.object(stage, "step", return_value=(batch, converged)),
+        ):
+            pipeline.step()
+
+    def test_first_stage_refills_only_after_a_send(self) -> None:
+        """The sampler is asked for replacements only when a send freed room."""
+        sampler = SizeAwareSampler(MockDataset([(2, 0)] * 6), max_batch_size=2)
+        stage = self._first_stage(sampler)
+        stage.active_batch = initialize_batch_for_dynamics(
+            sampler.build_initial_batch()
+        )
+
+        with patch.object(
+            sampler,
+            "request_replacements_budget",
+            wraps=sampler.request_replacements_budget,
+        ) as request:
+            self._step_first_stage(stage)
+            assert request.call_count == 0
+            self._step_first_stage(stage, torch.tensor([0]))
+            assert request.call_count == 1
+
+        assert stage.active_batch.num_graphs == 2
+
+    @pytest.mark.parametrize("site", ["initial", "rebuild"])
+    def test_first_stage_raises_when_sampler_cannot_build(self, site: str) -> None:
+        """A sampler that still holds systems but cannot batch them is an error."""
+        sampler = SizeAwareSampler(MockDataset([(2, 0)] * 6), max_batch_size=2)
+        stage = self._first_stage(sampler)
+        batch = initialize_batch_for_dynamics(sampler.build_initial_batch())
+        stage._ensure_buffers(batch)
+        stage.active_batch = batch if site == "rebuild" else None
+
+        with (
+            patch.object(
+                sampler,
+                "build_initial_batch",
+                side_effect=RuntimeError("constraints too tight"),
+            ),
+            pytest.raises(RuntimeError, match="constraints too tight"),
+        ):
+            self._step_first_stage(stage, torch.tensor([0, 1]))
+
+        assert not sampler.exhausted
+        assert not stage.done
+
     def test_refill_clears_stale_last_converged(self) -> None:
         """A graduation that shrinks the batch must drop stale ``_last_converged``.
 

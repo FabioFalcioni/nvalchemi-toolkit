@@ -9,6 +9,9 @@
 
 ## Fixed
 
+- The first `DistributedPipeline` stage asks its sampler for replacements
+  only after a send frees room. A sampler that cannot build a batch while
+  samples remain now raises instead of silently ending the stage.
 - `DistributedPipeline` sends that reach the send buffer's atom or edge
   capacity send the graduates that fit and keep the rest for a later send.
   Only a graph larger than the empty buffer raises `ValueError`, which gives

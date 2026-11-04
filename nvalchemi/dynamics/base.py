@@ -5967,7 +5967,7 @@ class DistributedPipeline:
         **Mode 2 (inflight batching):** When the first stage has
         ``inflight_mode=True`` (i.e., a sampler is configured), it builds
         batches from the sampler instead of receiving from a prior stage.
-        After sending, the first stage fills available capacity from the
+        After a send frees room, the first stage fills it from the
         sampler. Graduated samples that do not fit the send buffer stay
         in the batch until a later send and count toward the refill limits.
 
@@ -5979,8 +5979,10 @@ class DistributedPipeline:
         Raises
         ------
         RuntimeError
-            If ``torch.distributed`` is not initialized, or if the world
-            size does not match the number of configured pipeline stages.
+            If ``torch.distributed`` is not initialized, if the world
+            size does not match the number of configured pipeline stages,
+            or if the first stage's sampler cannot build a batch although
+            it is not exhausted.
         KeyError
             If the current rank is not in the global rank stage mapping.
         """
@@ -6014,6 +6016,9 @@ class DistributedPipeline:
                 try:
                     stage.active_batch = stage.sampler.build_initial_batch()
                 except RuntimeError:
+                    # Only running out of systems ends the stage.
+                    if not stage.sampler.exhausted:
+                        raise
                     stage.active_batch = None
                 if stage.active_batch is not None:
                     if stage.active_batch.device != stage.device:
@@ -6051,14 +6056,20 @@ class DistributedPipeline:
                         stage.active_batch.num_graphs if stage.active_batch else 0,
                     )
 
+                n_before_send = stage.active_batch.num_graphs
                 stage._poststep_sync_buffers(converged_indices)
 
                 if stage.active_batch is not None:
                     # Sending already removed the outgoing graphs. Retain all
                     # others, including unsent graduates, when filling capacity.
-                    stage.active_batch = stage.refill_check(
-                        stage.active_batch, stage.exit_status, remove_graduated=False
-                    )
+                    # The sampler's search can scan its whole dataset, so search
+                    # only when a send freed room.
+                    if stage.active_batch.num_graphs < n_before_send:
+                        stage.active_batch = stage.refill_check(
+                            stage.active_batch,
+                            stage.exit_status,
+                            remove_graduated=False,
+                        )
                 else:
                     if self.debug_mode:
                         logger.debug(
@@ -6069,6 +6080,8 @@ class DistributedPipeline:
                     try:
                         stage.active_batch = stage.sampler.build_initial_batch()
                     except RuntimeError:
+                        if not stage.sampler.exhausted:
+                            raise
                         stage.active_batch = None
                     if stage.active_batch is not None:
                         if stage.active_batch.device != stage.device:
